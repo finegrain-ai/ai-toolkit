@@ -45,6 +45,8 @@ class SampleConfig:
         self.width: int = kwargs.get('width', 512)
         self.height: int = kwargs.get('height', 512)
         self.prompts: list[str] = kwargs.get('prompts', [])
+        self.prompt_imgs: list[str] = kwargs.get('prompt_imgs', [])
+        self.prompt_masks: list[str] = kwargs.get('prompt_masks', [])
         self.neg = kwargs.get('neg', False)
         self.seed = kwargs.get('seed', 0)
         self.walk_seed = kwargs.get('walk_seed', False)
@@ -444,6 +446,7 @@ class ModelConfig:
         self.is_auraflow: bool = kwargs.get('is_auraflow', False)
         self.is_v3: bool = kwargs.get('is_v3', False)
         self.is_flux: bool = kwargs.get('is_flux', False)
+        self.is_flux_fill: bool = kwargs.get('is_flux_fill', False)
         self.is_flex2: bool = kwargs.get('is_flex2', False)
         if self.is_flex2:
             self.is_flux = True
@@ -742,6 +745,8 @@ class GenerateImageConfig:
             refiner_start_at: float = 0.5,  # start at this percentage of a step. 0.0 to 1.0 . 1.0 is the end
             extra_values: List[float] = None,  # extra values to save with prompt file
             logger: Optional[EmptyLogger] = None,
+            cond_image_path: str = None, # for flux_fill 
+            mask_path: str = None, # for flux_fill 
     ):
         self.width: int = width
         self.height: int = height
@@ -770,6 +775,8 @@ class GenerateImageConfig:
         self.extra_kwargs = extra_kwargs if extra_kwargs is not None else {}
         self.refiner_start_at = refiner_start_at
         self.extra_values = extra_values if extra_values is not None else []
+        self.cond_image_path = cond_image_path
+        self.mask_path = mask_path
 
         # prompt string will override any settings above
         self._process_prompt_string()
