@@ -257,7 +257,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
             for i in range(len(sample_config.prompts)):
                 test_image_paths.append(test_image_path_list[i % len(test_image_path_list)])
         
-        if self.model_config.is_flux_fill:
+        if self.model_config.is_fill:
             assert len(sample_config.prompt_imgs) == len(sample_config.prompts), f"Prompt images and prompts must be the same length ({len(sample_config.prompt_imgs)} != {len(sample_config.prompts)})"
             assert len(sample_config.prompt_masks) == len(sample_config.prompts), f"Prompt masks and prompts must be the same length ({len(sample_config.prompt_masks)} != {len(sample_config.prompts)}"
 
@@ -296,7 +296,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
             if self.adapter_config is not None and self.adapter_config.test_img_path is not None:
                 extra_args['adapter_image_path'] = test_image_paths[i]
             
-            if self.model_config.is_flux_fill:
+            if self.model_config.is_fill:
                 extra_args['cond_image_path'] = sample_config.prompt_imgs[i]
                 extra_args['mask_path'] = sample_config.prompt_masks[i]
 

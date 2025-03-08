@@ -185,7 +185,7 @@ class StableDiffusion:
         self.is_pixart = model_config.is_pixart
         self.is_auraflow = model_config.is_auraflow
         self.is_flux = model_config.is_flux
-        self.is_flux_fill = model_config.is_flux_fill
+        self.is_fill = model_config.is_fill
         self.is_flex2 = model_config.is_flex2
         self.is_lumina2 = model_config.is_lumina2
 
@@ -621,6 +621,7 @@ class StableDiffusion:
                     self.model_config.lora_path = self.model_config.assistant_lora_path
 
             if self.model_config.lora_path is not None:
+                assert not self.model_config.is_fill, "LoRA is not tested yet for fill models"
                 print_acc("Fusing in LoRA")
                 # need the pipe for peft
                 pipe: FluxPipeline = FluxPipeline(
@@ -733,233 +734,16 @@ class StableDiffusion:
             text_encoder.to(self.device_torch, dtype=dtype)
 
             self.print_and_status_update("Making pipe")
-            Pipe = FluxPipeline
-            if self.is_flex2:
-                Pipe = Flex2Pipeline
-            
-            pipe: Pipe = Pipe(
-                scheduler=scheduler,
-                text_encoder=text_encoder,
-                tokenizer=tokenizer,
-                text_encoder_2=None,
-                tokenizer_2=tokenizer_2,
-                vae=vae,
-                transformer=None,
-            )
-            pipe.text_encoder_2 = text_encoder_2
-            pipe.transformer = transformer
-
-            self.print_and_status_update("Preparing Model")
-
-            text_encoder = [pipe.text_encoder, pipe.text_encoder_2]
-            tokenizer = [pipe.tokenizer, pipe.tokenizer_2]
-
-            pipe.transformer = pipe.transformer.to(self.device_torch)
-
-            flush()
-            text_encoder[0].to(self.device_torch)
-            text_encoder[0].requires_grad_(False)
-            text_encoder[0].eval()
-            text_encoder[1].to(self.device_torch)
-            text_encoder[1].requires_grad_(False)
-            text_encoder[1].eval()
-            pipe.transformer = pipe.transformer.to(self.device_torch)
-            flush()
-        elif self.model_config.is_flux_fill:
-            self.print_and_status_update("Loading Flux Fill model")
-            base_model_path = self.model_config.name_or_path_original
-            self.print_and_status_update("Loading transformer")
-            subfolder = 'transformer'
-            transformer_path = model_path
-            local_files_only = False
-            # check if HF_DATASETS_OFFLINE or TRANSFORMERS_OFFLINE is set
-            if os.path.exists(transformer_path):
-                subfolder = None
-                transformer_path = os.path.join(transformer_path, 'transformer')
-                # check if the path is a full checkpoint.
-                te_folder_path = os.path.join(model_path, 'text_encoder')
-                # if we have the te, this folder is a full checkpoint, use it as the base
-                if os.path.exists(te_folder_path):
-                    base_model_path = model_path
-
-            transformer = FluxTransformer2DModel.from_pretrained(
-                transformer_path,
-                subfolder=subfolder,
-                torch_dtype=dtype,
-                # low_cpu_mem_usage=False,
-                # device_map=None
-            )
-            # hack in model gpu splitter
-            if self.model_config.split_model_over_gpus:
-                add_model_gpu_splitter_to_flux(
-                    transformer, 
-                    other_module_param_count_scale=self.model_config.split_model_other_module_param_count_scale
-                )
-            
-            if not self.low_vram:
-                # for low v ram, we leave it on the cpu. Quantizes slower, but allows training on primary gpu
-                transformer.to(self.quantize_device, dtype=dtype)
-            flush()
-
-            if self.model_config.assistant_lora_path is not None or self.model_config.inference_lora_path is not None:
-                if self.model_config.inference_lora_path is not None and self.model_config.assistant_lora_path is not None:
-                    raise ValueError("Cannot load both assistant lora and inference lora at the same time")
-                
-                if self.model_config.lora_path:
-                    raise ValueError("Cannot load both assistant lora and lora at the same time")
-
-                if not self.is_flux:
-                    raise ValueError("Assistant/ inference lora is only supported for flux models currently")
-                
-                load_lora_path = self.model_config.inference_lora_path
-                if load_lora_path is None:
-                    load_lora_path = self.model_config.assistant_lora_path
-
-                if os.path.isdir(load_lora_path):
-                    load_lora_path = os.path.join(
-                        load_lora_path, "pytorch_lora_weights.safetensors"
-                    )
-                elif not os.path.exists(load_lora_path):
-                    print_acc(f"Grabbing lora from the hub: {load_lora_path}")
-                    new_lora_path = hf_hub_download(
-                        load_lora_path,
-                        filename="pytorch_lora_weights.safetensors"
-                    )
-                    # replace the path
-                    load_lora_path = new_lora_path
-                    
-                    if self.model_config.inference_lora_path is not None:
-                        self.model_config.inference_lora_path = new_lora_path
-                    if self.model_config.assistant_lora_path is not None:
-                        self.model_config.assistant_lora_path = new_lora_path
-
-                if self.model_config.assistant_lora_path is not None:
-                    # for flux, we assume it is flux schnell. We cannot merge in the assistant lora and unmerge it on
-                    # quantized weights so it had to process unmerged (slow). Since schnell samples in just 4 steps
-                    # it is better to merge it in now, and sample slowly later, otherwise training is slowed in half
-                    # so we will merge in now and sample with -1 weight later
-                    self.invert_assistant_lora = True
-                    # trigger it to get merged in
-                    self.model_config.lora_path = self.model_config.assistant_lora_path
-
-            if self.model_config.lora_path is not None:
-                print_acc("Fusing in LoRA")
-                # need the pipe for peft
-                pipe: FluxFillPipeline = FluxFillPipeline(
-                    scheduler=None,
-                    text_encoder=None,
-                    tokenizer=None,
-                    text_encoder_2=None,
-                    tokenizer_2=None,
-                    vae=None,
-                    transformer=transformer,
-                )
-                if self.low_vram:
-                    # we cannot fuse the loras all at once without ooming in lowvram mode, so we have to do it in parts
-                    # we can do it on the cpu but it takes about 5-10 mins vs seconds on the gpu
-                    # we are going to separate it into the two transformer blocks one at a time
-
-                    lora_state_dict = load_file(self.model_config.lora_path)
-                    single_transformer_lora = {}
-                    single_block_key = "transformer.single_transformer_blocks."
-                    double_transformer_lora = {}
-                    double_block_key = "transformer.transformer_blocks."
-                    for key, value in lora_state_dict.items():
-                        if single_block_key in key:
-                            single_transformer_lora[key] = value
-                        elif double_block_key in key:
-                            double_transformer_lora[key] = value
-                        else:
-                            raise ValueError(f"Unknown lora key: {key}. Cannot load this lora in low vram mode")
-
-                    # double blocks
-                    transformer.transformer_blocks = transformer.transformer_blocks.to(
-                        self.quantize_device, dtype=dtype
-                    )
-                    pipe.load_lora_weights(double_transformer_lora, adapter_name=f"lora1_double")
-                    pipe.fuse_lora()
-                    pipe.unload_lora_weights()
-                    transformer.transformer_blocks = transformer.transformer_blocks.to(
-                        'cpu', dtype=dtype
-                    )
-
-                    # single blocks
-                    transformer.single_transformer_blocks = transformer.single_transformer_blocks.to(
-                        self.quantize_device, dtype=dtype
-                    )
-                    pipe.load_lora_weights(single_transformer_lora, adapter_name=f"lora1_single")
-                    pipe.fuse_lora()
-                    pipe.unload_lora_weights()
-                    transformer.single_transformer_blocks = transformer.single_transformer_blocks.to(
-                        'cpu', dtype=dtype
-                    )
-
-                    # cleanup
-                    del single_transformer_lora
-                    del double_transformer_lora
-                    del lora_state_dict
-                    flush()
-
-                else:
-                    # need the pipe to do this unfortunately for now
-                    # we have to fuse in the weights before quantizing
-                    pipe.load_lora_weights(self.model_config.lora_path, adapter_name="lora1")
-                    pipe.fuse_lora()
-                    # unfortunately, not an easier way with peft
-                    pipe.unload_lora_weights()
-            flush()
-            
-            if self.model_config.quantize:
-                # patch the state dict method
-                patch_dequantization_on_save(transformer)
-                quantization_type = qfloat8
-                self.print_and_status_update("Quantizing transformer")
-                quantize(transformer, weights=quantization_type, **self.model_config.quantize_kwargs)
-                freeze(transformer)
-                transformer.to(self.device_torch)
-            else:
-                transformer.to(self.device_torch, dtype=dtype)
-
-            flush()
-
-            scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(base_model_path, subfolder="scheduler")
-            self.print_and_status_update("Loading VAE")
-            vae = AutoencoderKL.from_pretrained(base_model_path, subfolder="vae", torch_dtype=dtype)
-            flush()
-            
-            if self.is_flex2:
-                tokenizer_2 = AutoTokenizer.from_pretrained(base_model_path, subfolder="tokenizer_2")
-                text_encoder_2 = AutoModel.from_pretrained(base_model_path, subfolder="text_encoder_2", torch_dtype=dtype)
-                
-            else:
-                self.print_and_status_update("Loading T5")
-                tokenizer_2 = T5TokenizerFast.from_pretrained(base_model_path, subfolder="tokenizer_2", torch_dtype=dtype)
-                text_encoder_2 = T5EncoderModel.from_pretrained(base_model_path, subfolder="text_encoder_2",
-                                                                torch_dtype=dtype)
-
-            text_encoder_2.to(self.device_torch, dtype=dtype)
-            flush()
-
-            if self.model_config.quantize_te:
+            if self.model_config.is_fill:
+                Pipe = FluxFillPipeline
                 if self.is_flex2:
-                    self.print_and_status_update("Quantizing LLM")
-                else:
-                    self.print_and_status_update("Quantizing T5")
-                quantize(text_encoder_2, weights=qfloat8)
-                freeze(text_encoder_2)
-                flush()
-                
-            self.print_and_status_update("Loading CLIP")
-            text_encoder = CLIPTextModel.from_pretrained(base_model_path, subfolder="text_encoder", torch_dtype=dtype)
-            tokenizer = CLIPTokenizer.from_pretrained(base_model_path, subfolder="tokenizer", torch_dtype=dtype)
-            text_encoder.to(self.device_torch, dtype=dtype)
-
-            self.print_and_status_update("Making pipe")
-            Pipe = FluxFillPipeline
-            if self.is_flex2:
-                raise ValueError("Flex2 is not supported for Flux Fill models")
+                    raise ValueError("Flex2 is not tested yet for FluxFill models")
+            else:
+                Pipe = FluxPipeline
+                if self.is_flex2:
+                    Pipe = Flex2Pipeline
             
-            pipe: Pipe = Pipe(
+            pipe = Pipe(
                 scheduler=scheduler,
                 text_encoder=text_encoder,
                 tokenizer=tokenizer,
@@ -1155,7 +939,7 @@ class StableDiffusion:
         # add hacks to unet to help training
         # pipe.unet = prepare_unet_for_training(pipe.unet)
 
-        if self.is_pixart or self.is_v3 or self.is_auraflow or self.is_flux or self.is_lumina2 or self.is_flux_fill:
+        if self.is_pixart or self.is_v3 or self.is_auraflow or self.is_flux or self.is_lumina2:
             # pixart and sd3 dont use a unet
             self.unet = pipe.transformer
             self.unet_unwrapped = pipe.transformer
@@ -1337,8 +1121,6 @@ class StableDiffusion:
                         arch = 'pixart'
                     if self.is_flux:
                         arch = 'flux'
-                    if self.is_flux_fill:
-                        arch = 'flux_fill'
                     if self.is_flex2:
                         arch = 'flex2'
                     if self.is_lumina2:
@@ -1402,6 +1184,7 @@ class StableDiffusion:
                 pipeline.watermark = None
             elif self.is_flux:
                 if self.model_config.use_flux_cfg:
+                    assert not self.is_fill, "Flux fill is not supported with flux cfg"
                     pipeline = FluxWithCFGPipeline(
                         vae=self.vae,
                         transformer=unwrap_model(self.unet),
@@ -1414,9 +1197,12 @@ class StableDiffusion:
                     )
 
                 else:
+
                     Pipe = FluxPipeline
                     if self.is_flex2:
                         Pipe = Flex2Pipeline
+                    elif self.is_fill:
+                        Pipe = FluxFillPipeline
                     
                     pipeline = Pipe(
                         vae=self.vae,
@@ -1429,19 +1215,6 @@ class StableDiffusion:
                         **extra_args
                     )
                 pipeline.watermark = None
-            elif self.is_flux_fill:
-                Pipe = FluxFillPipeline
-
-                pipeline = Pipe(
-                    vae=self.vae,
-                    transformer=unwrap_model(self.unet),
-                    text_encoder=unwrap_model(self.text_encoder[0]),
-                    text_encoder_2=unwrap_model(self.text_encoder[1]),
-                    tokenizer=self.tokenizer[0],
-                    tokenizer_2=self.tokenizer[1],
-                    scheduler=noise_scheduler,
-                    **extra_args
-                )
             elif self.is_lumina2:
                 pipeline = Lumina2Text2ImgPipeline(
                     vae=self.vae,
@@ -1570,7 +1343,7 @@ class StableDiffusion:
                     
                     mask_image = None
                     cond_image = None
-                    if self.is_flux_fill:
+                    if self.is_fill:
                         print_acc("Loading mask image", gen_config)
                         mask_image = Image.open(gen_config.mask_path).convert("RGB")
                         cond_image = Image.open(gen_config.cond_image_path).convert("RGB")
@@ -1729,6 +1502,7 @@ class StableDiffusion:
                         ).images[0]
                     elif self.is_flux:
                         if self.model_config.use_flux_cfg:
+                            assert not self.is_fill, "Flux fill is not supported with flux cfg"
                             img = pipeline(
                                 prompt_embeds=conditional_embeds.text_embeds,
                                 pooled_prompt_embeds=conditional_embeds.pooled_embeds,
@@ -1749,45 +1523,39 @@ class StableDiffusion:
                                 if latents.dtype != self.unet.dtype:
                                     latents = latents.to(self.unet.dtype)
                                 return {"latents": latents}
-                            img = pipeline(
-                                prompt_embeds=conditional_embeds.text_embeds,
-                                pooled_prompt_embeds=conditional_embeds.pooled_embeds,
-                                # negative_prompt_embeds=unconditional_embeds.text_embeds,
-                                # negative_pooled_prompt_embeds=unconditional_embeds.pooled_embeds,
-                                height=gen_config.height,
-                                width=gen_config.width,
-                                num_inference_steps=gen_config.num_inference_steps,
-                                guidance_scale=gen_config.guidance_scale,
-                                latents=gen_config.latents,
-                                generator=generator,
-                                callback_on_step_end=callback_on_step_end,
-                                **extra
-                            ).images[0]
-                    elif self.is_flux_fill:
-                        # Fix a bug in diffusers/torch
-                        def callback_on_step_end(pipe, i, t, callback_kwargs):
-                            latents = callback_kwargs["latents"]
-                            if latents.dtype != self.unet.dtype:
-                                latents = latents.to(self.unet.dtype)
-                            return {"latents": latents}
-
-                        masked_image_latents = masked_image_latents
-                        img = pipeline(
-                            prompt_embeds=conditional_embeds.text_embeds,
-                            mask_image=mask_image,
-                            image=image,
-                            pooled_prompt_embeds=conditional_embeds.pooled_embeds,
-                            # negative_prompt_embeds=unconditional_embeds.text_embeds,
-                            # negative_pooled_prompt_embeds=unconditional_embeds.pooled_embeds,
-                            height=gen_config.height,
-                            width=gen_config.width,
-                            num_inference_steps=gen_config.num_inference_steps,
-                            guidance_scale=gen_config.guidance_scale,
-                            latents=gen_config.latents,
-                            generator=generator,
-                            callback_on_step_end=callback_on_step_end,
-                            **extra
-                        ).images[0]
+                            
+                            if self.is_fill:
+                                img = pipeline(
+                                    prompt_embeds=conditional_embeds.text_embeds,
+                                    mask_image=mask_image,
+                                    image=cond_image,
+                                    pooled_prompt_embeds=conditional_embeds.pooled_embeds,
+                                    # negative_prompt_embeds=unconditional_embeds.text_embeds,
+                                    # negative_pooled_prompt_embeds=unconditional_embeds.pooled_embeds,
+                                    height=gen_config.height,
+                                    width=gen_config.width,
+                                    num_inference_steps=gen_config.num_inference_steps,
+                                    guidance_scale=gen_config.guidance_scale,
+                                    latents=gen_config.latents,
+                                    generator=generator,
+                                    callback_on_step_end=callback_on_step_end,
+                                    **extra
+                                ).images[0]
+                            else:
+                                img = pipeline(
+                                    prompt_embeds=conditional_embeds.text_embeds,
+                                    pooled_prompt_embeds=conditional_embeds.pooled_embeds,
+                                    # negative_prompt_embeds=unconditional_embeds.text_embeds,
+                                    # negative_pooled_prompt_embeds=unconditional_embeds.pooled_embeds,
+                                    height=gen_config.height,
+                                    width=gen_config.width,
+                                    num_inference_steps=gen_config.num_inference_steps,
+                                    guidance_scale=gen_config.guidance_scale,
+                                    latents=gen_config.latents,
+                                    generator=generator,
+                                    callback_on_step_end=callback_on_step_end,
+                                    **extra
+                                ).images[0]
                     elif self.is_lumina2:
                         pipeline: Lumina2Text2ImgPipeline = pipeline
 
@@ -2322,6 +2090,27 @@ class StableDiffusion:
                                 guidance = guidance.expand(latents.shape[0])
                         else:
                             guidance = None
+                        
+                        # handle fill
+                        if self.is_fill:
+                            # from https://github.com/black-forest-labs/flux/blob/716724eb276d94397be99710a0a54d352664e23b/src/flux/sampling.py#L134C9-L143C10
+                            mask = kwargs.get("mask")
+                            if mask.ndim != 3:
+                                raise ValueError("Mask must be 3D Tensor")
+                            mask = rearrange(
+                                mask,
+                                "b (h ph) (w pw) -> b (ph pw) h w",
+                                ph=8,
+                                pw=8,
+                            )
+
+                            img_cond = kwargs.get("image")
+                            img_cond = rearrange(img_cond, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
+                            if img_cond.shape != latent_model_input.shape:
+                                raise ValueError("Image must have the same shape as latents")
+
+                            latent_model_input_packed = torch.cat((latent_model_input_packed, img_cond, mask), dim=-1)
+
                     
                     if bypass_guidance_embedding:
                         bypass_flux_guidance(self.unet)
@@ -2333,6 +2122,7 @@ class StableDiffusion:
                     if img_ids.ndim == 3:
                         img_ids = img_ids[0]
                     # with torch.amp.autocast(device_type='cuda', dtype=cast_dtype):
+                    
                     noise_pred = self.unet(
                         hidden_states=latent_model_input_packed.to(self.device_torch, cast_dtype),  # [1, 4096, 64]
                         # YiYi notes: divide it by 1000 for now because we scale it by 1000 in the transforme rmodel (we should not keep it but I want to keep the inputs same for the model for testing)
@@ -3018,7 +2808,7 @@ class StableDiffusion:
             named_params = self.named_parameters(vae=False, unet=unet, text_encoder=False, state_dict_keys=True)
             unet_lr = unet_lr if unet_lr is not None else default_lr
             params = []
-            if self.is_pixart or self.is_auraflow or self.is_flux or self.is_v3 or self.is_lumina2 or self.is_flux_fill:
+            if self.is_pixart or self.is_auraflow or self.is_flux or self.is_v3 or self.is_lumina2:
                 for param in named_params.values():
                     if param.requires_grad:
                         params.append(param)
@@ -3066,7 +2856,7 @@ class StableDiffusion:
         # this is useful for when we want to alter the state and restore it
         if self.is_lumina2:
             unet_has_grad = self.unet.x_embedder.weight.requires_grad
-        elif self.is_pixart or self.is_v3 or self.is_auraflow or self.is_flux or self.is_flux_fill:
+        elif self.is_pixart or self.is_v3 or self.is_auraflow or self.is_flux:
             unet_has_grad = self.unet.proj_out.weight.requires_grad
         else:
             unet_has_grad = self.unet.conv_in.weight.requires_grad
