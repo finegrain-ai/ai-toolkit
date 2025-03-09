@@ -1344,7 +1344,6 @@ class StableDiffusion:
                     mask_image = None
                     cond_image = None
                     if self.is_fill:
-                        print_acc("Loading mask image", gen_config)
                         mask_image = Image.open(gen_config.mask_path).convert("RGB")
                         cond_image = Image.open(gen_config.cond_image_path).convert("RGB")
 
@@ -2094,20 +2093,23 @@ class StableDiffusion:
                         # handle fill
                         if self.is_fill:
                             # from https://github.com/black-forest-labs/flux/blob/716724eb276d94397be99710a0a54d352664e23b/src/flux/sampling.py#L134C9-L143C10
-                            mask = kwargs.get("mask")
+                            mask = kwargs.get("fill_mask_tensor").to(latent_model_input_packed.device)
+                            del kwargs["fill_mask_tensor"]
+                            mask = mask.squeeze(1)
                             if mask.ndim != 3:
-                                raise ValueError("Mask must be 3D Tensor")
+                                raise ValueError(f"Mask must be 3D Tensor, got {mask.shape}")
                             mask = rearrange(
                                 mask,
                                 "b (h ph) (w pw) -> b (ph pw) h w",
                                 ph=8,
                                 pw=8,
                             )
-
-                            img_cond = kwargs.get("image")
+                            mask = rearrange(mask, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
+                            img_cond = kwargs.get("fill_cond_latents").to(latent_model_input_packed.device)
+                            del kwargs["fill_cond_latents"]
                             img_cond = rearrange(img_cond, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
-                            if img_cond.shape != latent_model_input.shape:
-                                raise ValueError("Image must have the same shape as latents")
+                            if img_cond.shape != latent_model_input_packed.shape:
+                                raise ValueError(f"Image must have the same shape as latents, got {img_cond.shape} and {latent_model_input_packed.shape}")
 
                             latent_model_input_packed = torch.cat((latent_model_input_packed, img_cond, mask), dim=-1)
 

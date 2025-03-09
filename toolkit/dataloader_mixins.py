@@ -446,6 +446,10 @@ class ImageProcessingDTOMixin:
                 self.load_mask_image()
             if self.has_unconditional:
                 self.load_unconditional_image()
+            if self.has_fill_cond:
+                self.load_fill_cond_image()
+            if self.has_fill_mask_image:
+                self.load_fill_mask_image()
             return
         try:
             img = Image.open(self.path)
@@ -541,6 +545,10 @@ class ImageProcessingDTOMixin:
                 self.load_mask_image()
             if self.has_unconditional:
                 self.load_unconditional_image()
+            if self.has_fill_cond:
+                self.load_fill_cond_image()
+            if self.has_fill_mask_image:
+                self.load_fill_mask_image()
 
 
 class ControlFileItemDTOMixin:
@@ -1062,6 +1070,169 @@ class MaskFileItemDTOMixin:
         self.mask_tensor = None
 
 
+class FillMaskFileItemDTOMixin:
+    def __init__(self: 'FileItemDTO', *args, **kwargs):
+        if hasattr(super(), '__init__'):
+            super().__init__(*args, **kwargs)
+        self.has_fill_mask_image = False
+        self.fill_mask_path: Union[str, None] = None
+        self.fill_mask_tensor: Union[torch.Tensor, None] = None
+        dataset_config: 'DatasetConfig' = kwargs.get('dataset_config', None)
+        if dataset_config.fill_mask_path is not None:
+            # find the control image path
+            fill_mask_path = dataset_config.fill_mask_path
+            # we are using control images
+            img_path = kwargs.get('path', None)
+            img_ext_list = ['.jpg', '.jpeg', '.png', '.webp']
+            file_name_no_ext = os.path.splitext(os.path.basename(img_path))[0]
+            for ext in img_ext_list:
+                if os.path.exists(os.path.join(fill_mask_path, file_name_no_ext + ext)):
+                    self.fill_mask_path = os.path.join(fill_mask_path, file_name_no_ext + ext)
+                    self.has_fill_mask_image = True
+                    break
+
+    def load_fill_mask_image(self: 'FileItemDTO'):
+        try:
+            img = Image.open(self.fill_mask_path)
+            img = exif_transpose(img)
+        except Exception as e:
+            print_acc(f"Error: {e}")
+            print_acc(f"Error loading image: {self.fill_mask_path}")
+
+        img = img.convert('RGB')
+
+        w, h = img.size
+        fix_size = False
+        if w > h and self.scale_to_width < self.scale_to_height:
+            # throw error, they should match
+            print_acc(f"unexpected values: w={w}, h={h}, file_item.scale_to_width={self.scale_to_width}, file_item.scale_to_height={self.scale_to_height}, file_item.path={self.path}")
+            fix_size = True
+        elif h > w and self.scale_to_height < self.scale_to_width:
+            # throw error, they should match
+            print_acc(f"unexpected values: w={w}, h={h}, file_item.scale_to_width={self.scale_to_width}, file_item.scale_to_height={self.scale_to_height}, file_item.path={self.path}")
+            fix_size = True
+
+        if fix_size:
+            # swap all the sizes
+            self.scale_to_width, self.scale_to_height = self.scale_to_height, self.scale_to_width
+            self.crop_width, self.crop_height = self.crop_height, self.crop_width
+            self.crop_x, self.crop_y = self.crop_y, self.crop_x
+
+
+
+
+        if self.flip_x:
+            # do a flip
+            img = img.transpose(Image.FLIP_LEFT_RIGHT)
+        if self.flip_y:
+            # do a flip
+            img = img.transpose(Image.FLIP_TOP_BOTTOM)
+
+        # randomly apply a blur up to 0.5% of the size of the min (width, height)
+        min_size = min(img.width, img.height)
+        blur_radius = int(min_size * random.random() * 0.005)
+        img = img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+
+        # make grayscale
+        img = img.convert('L')
+
+        if self.dataset_config.buckets:
+            # scale and crop based on file item
+            img = img.resize((self.scale_to_width, self.scale_to_height), Image.BICUBIC)
+            # img = transforms.CenterCrop((self.crop_height, self.crop_width))(img)
+            # crop
+            img = img.crop((
+                self.crop_x,
+                self.crop_y,
+                self.crop_x + self.crop_width,
+                self.crop_y + self.crop_height
+            ))
+        else:
+            raise Exception("Mask images not supported for non-bucket datasets")
+
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+        ])
+        if self.aug_replay_spatial_transforms:
+            self.fill_mask_tensor = self.augment_spatial_control(img, transform=transform)
+        else:
+            self.fill_mask_tensor = transform(img)
+
+    def cleanup_fill_mask(self: 'FileItemDTO'):
+        self.fill_mask_tensor = None
+
+class FillCondFileItemDTOMixin:
+    def __init__(self: 'FileItemDTO', *args, **kwargs):
+        if hasattr(super(), '__init__'):
+            super().__init__(*args, **kwargs)
+        self.has_fill_cond = False
+        self.fill_cond_path: Union[str, None] = None
+        self.fill_cond_tensor: Union[torch.Tensor, None] = None
+        self.fill_cond_latent: Union[torch.Tensor, None] = None
+        self.fill_cond_transforms = self.dataloader_transforms
+        dataset_config: 'DatasetConfig' = kwargs.get('dataset_config', None)
+
+        if dataset_config.fill_cond_path is not None:
+            img_path = kwargs.get('path', None)
+            img_ext_list = ['.jpg', '.jpeg', '.png', '.webp']
+            file_name_no_ext = os.path.splitext(os.path.basename(img_path))[0]
+            for ext in img_ext_list:
+                if os.path.exists(os.path.join(dataset_config.fill_cond_path, file_name_no_ext + ext)):
+                    self.fill_cond_path = os.path.join(dataset_config.fill_cond_path, file_name_no_ext + ext)
+                    self.has_fill_cond = True
+                    break
+
+    def load_fill_cond_image(self: 'FileItemDTO'):
+        try:
+            img = Image.open(self.fill_cond_path)
+            img = exif_transpose(img)
+        except Exception as e:
+            print_acc(f"Error: {e}")
+            print_acc(f"Error loading image: {self.fill_cond_path}")
+
+        img = img.convert('RGB')
+        w, h = img.size
+        if w > h and self.scale_to_width < self.scale_to_height:
+            # throw error, they should match
+            raise ValueError(
+                f"unexpected values: w={w}, h={h}, file_item.scale_to_width={self.scale_to_width}, file_item.scale_to_height={self.scale_to_height}, file_item.path={self.path}")
+        elif h > w and self.scale_to_height < self.scale_to_width:
+            # throw error, they should match
+            raise ValueError(
+                f"unexpected values: w={w}, h={h}, file_item.scale_to_width={self.scale_to_width}, file_item.scale_to_height={self.scale_to_height}, file_item.path={self.path}")
+
+        if self.flip_x:
+            # do a flip
+            img = img.transpose(Image.FLIP_LEFT_RIGHT)
+        if self.flip_y:
+            # do a flip
+            img = img.transpose(Image.FLIP_TOP_BOTTOM)
+
+        if self.dataset_config.buckets:
+            # scale and crop based on file item
+            img = img.resize((self.scale_to_width, self.scale_to_height), Image.BICUBIC)
+            # img = transforms.CenterCrop((self.crop_height, self.crop_width))(img)
+            # crop
+            img = img.crop((
+                self.crop_x,
+                self.crop_y,
+                self.crop_x + self.crop_width,
+                self.crop_y + self.crop_height
+            ))
+        else:
+            raise Exception("Cond images are not supported for non-bucket datasets")
+
+        if self.aug_replay_spatial_transforms:
+            self.fill_cond_tensor = self.augment_spatial_control(img, transform=self.fill_cond_transforms)
+        else:
+            self.fill_cond_tensor = self.fill_cond_transforms(img)
+
+    def cleanup_fill_cond(self: 'FileItemDTO'):
+        self.fill_cond_tensor = None
+        self.fill_cond_latent = None
+
+
+
 class UnconditionalFileItemDTOMixin:
     def __init__(self: 'FileItemDTO', *args, **kwargs):
         if hasattr(super(), '__init__'):
@@ -1535,10 +1706,10 @@ class CLIPCachingMixin:
                 hash_str = base64.urlsafe_b64encode(hashlib.md5(hash_input).digest()).decode('ascii')
                 hash_str = hash_str.replace('=', '')
 
-                uncond_path = os.path.join(clip_vision_cache_path, f'uncond_{hash_str}_{i}.safetensors')
-                if os.path.exists(uncond_path):
+                unfill_cond_path = os.path.join(clip_vision_cache_path, f'unfill_cond_{hash_str}_{i}.safetensors')
+                if os.path.exists(unfill_cond_path):
                     # skip it
-                    unconditional_paths.append(uncond_path)
+                    unconditional_paths.append(unfill_cond_path)
                     continue
 
                 # generate a random image
@@ -1572,9 +1743,9 @@ class CLIPCachingMixin:
                     ('penultimate_hidden_states', clip_output.hidden_states[-2].clone().detach().cpu()),
                 ])
 
-                os.makedirs(os.path.dirname(uncond_path), exist_ok=True)
-                save_file(state_dict, uncond_path)
-                unconditional_paths.append(uncond_path)
+                os.makedirs(os.path.dirname(unfill_cond_path), exist_ok=True)
+                save_file(state_dict, unfill_cond_path)
+                unconditional_paths.append(unfill_cond_path)
 
             self.clip_vision_unconditional_cache = unconditional_paths
 

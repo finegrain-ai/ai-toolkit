@@ -11,7 +11,7 @@ from PIL.ImageOps import exif_transpose
 from toolkit import image_utils
 from toolkit.dataloader_mixins import CaptionProcessingDTOMixin, ImageProcessingDTOMixin, LatentCachingFileItemDTOMixin, \
     ControlFileItemDTOMixin, ArgBreakMixin, PoiFileItemDTOMixin, MaskFileItemDTOMixin, AugmentationFileItemDTOMixin, \
-    UnconditionalFileItemDTOMixin, ClipImageFileItemDTOMixin
+    UnconditionalFileItemDTOMixin, ClipImageFileItemDTOMixin, FillCondFileItemDTOMixin, FillMaskFileItemDTOMixin
 
 
 if TYPE_CHECKING:
@@ -37,8 +37,10 @@ class FileItemDTO(
     MaskFileItemDTOMixin,
     AugmentationFileItemDTOMixin,
     UnconditionalFileItemDTOMixin,
+    FillCondFileItemDTOMixin,
+    FillMaskFileItemDTOMixin,
     PoiFileItemDTOMixin,
-    ArgBreakMixin,
+    ArgBreakMixin
 ):
     def __init__(self, *args, **kwargs):
         self.path = kwargs.get('path', '')
@@ -94,7 +96,8 @@ class FileItemDTO(
         self.cleanup_clip_image()
         self.cleanup_mask()
         self.cleanup_unconditional()
-
+        self.cleanup_fill_cond()
+        self.cleanup_fill_mask()
 
 class DataLoaderBatchDTO:
     def __init__(self, **kwargs):
@@ -109,6 +112,7 @@ class DataLoaderBatchDTO:
             self.unaugmented_tensor: Union[torch.Tensor, None] = None
             self.unconditional_tensor: Union[torch.Tensor, None] = None
             self.unconditional_latents: Union[torch.Tensor, None] = None
+            self.fill_cond_latents: Union[torch.Tensor, None] = None
             self.clip_image_embeds: Union[List[dict], None] = None
             self.clip_image_embeds_unconditional: Union[List[dict], None] = None
             self.sigmas: Union[torch.Tensor, None] = None  # can be added elseware and passed along training code
@@ -201,7 +205,38 @@ class DataLoaderBatchDTO:
                     else:
                         unconditional_tensor.append(x.unconditional_tensor)
                 self.unconditional_tensor = torch.cat([x.unsqueeze(0) for x in unconditional_tensor])
-
+            
+            # add fill cond tensors
+            if any([x.fill_cond_tensor is not None for x in self.file_items]):
+                # find one to use as a base
+                base_fill_cond_tensor = None
+                for x in self.file_items:
+                    if x.unaugmented_tensor is not None:
+                        base_fill_cond_tensor = x.fill_cond_tensor
+                        break
+                fill_cond_tensor = []
+                for x in self.file_items:
+                    if x.fill_cond_tensor is None:
+                        fill_cond_tensor.append(torch.zeros_like(base_fill_cond_tensor))
+                    else:
+                        fill_cond_tensor.append(x.fill_cond_tensor)
+                self.fill_cond_tensor = torch.cat([x.unsqueeze(0) for x in fill_cond_tensor])
+            
+            if any([x.fill_mask_tensor is not None for x in self.file_items]):
+                # find one to use as a base
+                base_fill_mask_tensor = None
+                for x in self.file_items:
+                    if x.fill_mask_tensor is not None:
+                        base_fill_mask_tensor = x.fill_mask_tensor
+                        break
+                fill_mask_tensor = []
+                for x in self.file_items:
+                    if x.fill_mask_tensor is None:
+                        fill_mask_tensor.append(torch.zeros_like(base_fill_mask_tensor))
+                    else:
+                        fill_mask_tensor.append(x.fill_mask_tensor)
+                self.fill_mask_tensor = torch.cat([x.unsqueeze(0) for x in fill_mask_tensor])
+            
             if any([x.clip_image_embeds is not None for x in self.file_items]):
                 self.clip_image_embeds = []
                 for x in self.file_items:

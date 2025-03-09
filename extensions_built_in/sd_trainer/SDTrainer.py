@@ -1633,6 +1633,10 @@ class SDTrainer(BaseSDTrainProcess):
                                 pred_kwargs['down_block_additional_residuals'] = down_block_res_samples
                                 pred_kwargs['mid_block_additional_residual'] = mid_block_res_sample
 
+                if self.model_config.is_fill:
+                    pred_kwargs['fill_cond_latents'] = batch.fill_cond_latents
+                    pred_kwargs['fill_mask_tensor'] = batch.fill_mask_tensor
+                
                 self.before_unet_predict()
                 # do a prior pred if we have an unconditional image, we will swap out the giadance later
                 if batch.unconditional_latents is not None or self.do_guided_loss:

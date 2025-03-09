@@ -648,6 +648,8 @@ class DatasetConfig:
                                          None)  # focus mask (black and white. White has higher loss than black)
         self.unconditional_path: str = kwargs.get('unconditional_path',
                                                   None)  # path where matching unconditional images are located
+        self.fill_cond_path: str = kwargs.get('fill_cond_path', None)  # path where input images are located for fill
+        self.fill_mask_path: str = kwargs.get('fill_mask_path', None)  # path where masks are located for fill
         self.invert_mask: bool = kwargs.get('invert_mask', False)  # invert mask
         self.mask_min_value: float = kwargs.get('mask_min_value', 0.0)  # min value for . 0 - 1
         self.poi: Union[str, None] = kwargs.get('poi',

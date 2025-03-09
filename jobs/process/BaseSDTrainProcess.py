@@ -1070,7 +1070,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     unconditional_imgs = unconditional_imgs.to(self.device_torch, dtype=dtype)
                     unconditional_latents = self.sd.encode_images(unconditional_imgs)
                     batch.unconditional_latents = unconditional_latents * self.train_config.latent_multiplier
-
+                
+                if batch.fill_cond_tensor is not None and batch.fill_cond_latents is None:
+                    fill_cond_imgs = batch.fill_cond_tensor
+                    fill_cond_imgs = fill_cond_imgs.to(self.device_torch, dtype=dtype)
+                    fill_cond_latents = self.sd.encode_images(fill_cond_imgs)
+                    batch.fill_cond_latents = fill_cond_latents * self.train_config.latent_multiplier
+                
                 unaugmented_latents = None
                 if self.train_config.loss_target == 'differential_noise':
                     # we determine noise from the differential of the latents
